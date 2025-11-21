@@ -312,7 +312,7 @@ export function HomeTab() {
         <div className="mt-2 rounded-3xl overflow-hidden bg-black/20 border border-white/10 shadow-xl">
           <div className="aspect-square w-full bg-black/40">
             <img
-              src="https://ipfs.io/ipfs/bafybeicnbzidfbfp4f3pwadhj74dl3s2i75dez2nrklfwr4qzfljqztidu/nft-farcaster.png"
+              src="https://ipfs.io/ipfs/bafybeicnbzidfbfp4f3pwadhj74dl3s2i75dez2nrklfwr4qzfljqztidu"
               alt="Farcaster TANKA NFT"
               className="w-full h-full object-cover"
             />
