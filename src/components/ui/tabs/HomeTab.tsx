@@ -1,36 +1,36 @@
 "use client";
 
 import { useState } from "react";
-import { useAccount, useWriteContract, useReadContract } from "wagmi";
+import {
+  useAccount,
+  useWriteContract,
+  useReadContract,
+  usePublicClient,
+} from "wagmi";
 import { base } from "wagmi/chains";
+import { createCollectorClient } from "@zoralabs/protocol-sdk";
 import { ConnectWalletButton } from "~/components/ConnectWalletButton";
 
 const ZORA_1155_CONTRACT =
   "0xb587dd0dbab77e59c7b7a146aedb8a4ef1cefe8c" as const;
 const ZORA_TOKEN_ID = 1n;
 
-// ABI tối thiểu: hàm mint + getTokenInfo
+// ABI tối thiểu: chỉ cần getTokenInfo để đọc metadata/supply
 const ZORA_1155_ABI = [
   {
-    inputs: [
-      { internalType: "address", name: "to", type: "address" },
-      { internalType: "uint256", name: "tokenId", type: "uint256" },
-      { internalType: "uint256", name: "quantity", type: "uint256" },
-    ],
-    name: "mint",
-    outputs: [],
-    stateMutability: "nonpayable",
-    type: "function",
-  },
-  {
-    inputs: [
-      { internalType: "uint256", name: "tokenId", type: "uint256" },
-    ],
+    inputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
     name: "getTokenInfo",
     outputs: [
-      { internalType: "string", name: "uri", type: "string" },
-      { internalType: "uint256", name: "maxSupply", type: "uint256" },
-      { internalType: "uint256", name: "totalMinted", type: "uint256" },
+      {
+        components: [
+          { internalType: "string", name: "uri", type: "string" },
+          { internalType: "uint256", name: "maxSupply", type: "uint256" },
+          { internalType: "uint256", name: "totalMinted", type: "uint256" },
+        ],
+        internalType: "struct IZora1155.TokenData",
+        name: "",
+        type: "tuple",
+      },
     ],
     stateMutability: "view",
     type: "function",
@@ -39,6 +39,7 @@ const ZORA_1155_ABI = [
 
 export function HomeTab() {
   const { address, chainId } = useAccount();
+  const publicClient = usePublicClient({ chainId: base.id });
   const { writeContractAsync, isPending } = useWriteContract();
 
   const [status, setStatus] = useState<string | null>(null);
@@ -51,16 +52,23 @@ export function HomeTab() {
     address: ZORA_1155_CONTRACT,
     functionName: "getTokenInfo",
     args: [ZORA_TOKEN_ID],
+    chainId: base.id,
   });
 
-  const maxSupply = tokenInfo ? (tokenInfo as any)[1] as bigint : undefined;
-  const totalMinted = tokenInfo ? (tokenInfo as any)[2] as bigint : undefined;
+  // tokenInfo là struct { uri, maxSupply, totalMinted } (và cũng là tuple)
+  let maxSupply: bigint | undefined = undefined;
+  let totalMinted: bigint | undefined = undefined;
+
+  if (tokenInfo) {
+    const t = tokenInfo as any;
+    maxSupply = t.maxSupply ?? t[1];
+    totalMinted = t.totalMinted ?? t[2];
+  }
 
   // Tính % nếu có maxSupply > 0
   let progressPercent: number | null = null;
-  if (maxSupply && maxSupply > 0n && totalMinted !== undefined) {
-    progressPercent =
-      (Number(totalMinted) / Number(maxSupply)) * 100;
+  if (maxSupply !== undefined && maxSupply > 0n && totalMinted !== undefined) {
+    progressPercent = (Number(totalMinted) / Number(maxSupply)) * 100;
   }
 
   const handleMint = async () => {
@@ -76,17 +84,39 @@ export function HomeTab() {
       return;
     }
 
+    if (!publicClient) {
+      setError("Public client is not ready. Please try again.");
+      setStatus(null);
+      return;
+    }
+
     setStatus("Sending mint transaction...");
     setError(null);
     setTxHash(null);
 
     try {
-      const hash = await writeContractAsync({
-        abi: ZORA_1155_ABI,
-        address: ZORA_1155_CONTRACT,
-        functionName: "mint",
-        args: [address, ZORA_TOKEN_ID, 1n],
+      // Tạo collector client của Zora dùng viem publicClient
+      const collectorClient = createCollectorClient({
+        chainId: base.id,
+        publicClient,
       });
+
+      // Chuẩn bị transaction mint chuẩn Zora 1155
+      const { parameters } = await collectorClient.mint({
+        mintType: "1155",
+        tokenContract: ZORA_1155_CONTRACT,
+        tokenId: ZORA_TOKEN_ID,
+        mintRecipient: address,
+        quantityToMint: 1,
+        minterAccount: address,
+      });
+
+      if (!parameters) {
+        throw new Error("Unable to prepare mint transaction.");
+      }
+
+      // Gọi tx qua wagmi (parameters đã chứa abi, address, functionName, args, value,...)
+      const hash = await writeContractAsync(parameters as any);
 
       setStatus("Successfully minted the NFT 🎉");
       setTxHash(hash);
@@ -100,28 +130,12 @@ export function HomeTab() {
 
       if (raw.includes("user rejected") || raw.includes("User rejected")) {
         msg = "You rejected the transaction in your wallet.";
+      } else if (raw.includes("INSUFFICIENT_FUNDS")) {
+        msg = "Insufficient funds to pay gas and protocol fee on Base.";
       }
 
       setError(msg);
     }
-  };
-
-  const handleShareToFarcaster = () => {
-    if (!txHash || typeof window === "undefined") return;
-
-    const appUrl =
-      process.env.NEXT_PUBLIC_URL || "https://your-miniapp-url.xyz";
-    const txUrl = `https://basescan.org/tx/${txHash}`;
-
-    const text = encodeURIComponent(
-      "I just minted a Farcaster NFT on Base! Try this mini app:"
-    );
-
-    const composeUrl = `https://warpcast.com/~/compose?text=${text}%20${encodeURIComponent(
-      appUrl
-    )}&embeds[]=${encodeURIComponent(txUrl)}`;
-
-    window.open(composeUrl, "_blank", "noopener,noreferrer");
   };
 
   return (
@@ -167,7 +181,7 @@ export function HomeTab() {
         <div className="mt-2 rounded-3xl overflow-hidden bg-black/20 border border-white/10 shadow-xl">
           <div className="aspect-square w-full bg-black/40">
             <img
-              src="https://ipfs.io/ipfs/QmdLubv1jydCx8hAkPtP1NCddvs3aHP9pSzm472PXHHTcj/0.png"
+              src="https://ipfs.io/ipfs/bafybeicnbzidfbfp4f3pwadhj74dl3s2i75dez2nrklfwr4qzfljqztidu/nft-farcaster.png"
               alt="Farcaster TANKA NFT"
               className="w-full h-full object-cover"
             />
@@ -175,7 +189,7 @@ export function HomeTab() {
 
           <div className="bg-purple-900/60 px-4 py-3 space-y-2 border-t border-white/5">
             <ul className="text-[11px] space-y-1 text-purple-100">
-              <li>• Mint Price: Free mint</li>
+              <li>• Mint Price: Free mint (gas + Zora fee)</li>
               <li>• Mint Limit: 1 per wallet (soft rule)</li>
               <li>• Mint Method: FCFS (first come, first served)</li>
               <li>• Chain: Base Mainnet</li>
@@ -253,15 +267,6 @@ export function HomeTab() {
             <div className="rounded-xl border border-red-300/40 bg-red-900/30 px-3 py-2 text-[11px] text-red-100">
               {error}
             </div>
-          )}
-
-          {txHash && (
-            <button
-              onClick={handleShareToFarcaster}
-              className="w-full py-2 rounded-full bg-transparent border border-purple-400/80 text-[11px] font-medium text-purple-100 hover:bg-purple-900/40"
-            >
-              Share this transaction to Farcaster
-            </button>
           )}
         </div>
       </div>
