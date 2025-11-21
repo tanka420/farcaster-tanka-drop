@@ -5,36 +5,21 @@ import {
   useAccount,
   useWriteContract,
   useReadContract,
-  usePublicClient,
 } from "wagmi";
 import { base } from "wagmi/chains";
-import { mint as zoraMint } from "@zoralabs/protocol-sdk";
+import { encodeAbiParameters } from "viem";
 import { ConnectWalletButton } from "~/components/ConnectWalletButton";
 
 const ZORA_1155_CONTRACT =
   "0xB51EB1a3FA71Ad0fEfDCC8A1A17821016bc4fc68" as const;
 const ZORA_TOKEN_ID = 1n;
 
-// ABI tối thiểu: getTokenInfo + balanceOf
+// Minter strategy: Zora Timed Sale Strategy Proxy (Boss vừa tìm)
+const ZORA_TIMED_SALE_MINTER =
+  "0x777777722D078c97c6ad07d9f36801e653E356Ae" as const;
+
+// ABI tối thiểu của Zora1155: balanceOf, getTokenInfo, mintFee, mint(...)
 const ZORA_1155_ABI = [
-  {
-    inputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
-    name: "getTokenInfo",
-    outputs: [
-      {
-        components: [
-          { internalType: "string", name: "uri", type: "string" },
-          { internalType: "uint256", name: "maxSupply", type: "uint256" },
-          { internalType: "uint256", name: "totalMinted", type: "uint256" },
-        ],
-        internalType: "struct IZora1155.TokenData",
-        name: "",
-        type: "tuple",
-      },
-    ],
-    stateMutability: "view",
-    type: "function",
-  },
   {
     inputs: [
       { internalType: "address", name: "account", type: "address" },
@@ -45,18 +30,87 @@ const ZORA_1155_ABI = [
     stateMutability: "view",
     type: "function",
   },
+  {
+    inputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
+    name: "getTokenInfo",
+    outputs: [
+      {
+        components: [
+          { internalType: "string", name: "uri", type: "string" },
+          { internalType: "uint256", name: "maxSupply", type: "uint256" },
+          { internalType: "uint256", name: "totalMinted", type: "uint256" },
+        ],
+        internalType: "struct IZoraCreator1155TypesV1.TokenData",
+        name: "",
+        type: "tuple",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "mintFee",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    // mint(IMinter1155 minter, uint256 tokenId, uint256 quantity, address[] rewardsRecipients, bytes minterArguments) payable
+    inputs: [
+      { internalType: "address", name: "minter", type: "address" },
+      { internalType: "uint256", name: "tokenId", type: "uint256" },
+      { internalType: "uint256", name: "quantity", type: "uint256" },
+      {
+        internalType: "address[]",
+        name: "rewardsRecipients",
+        type: "address[]",
+      },
+      { internalType: "bytes", name: "minterArguments", type: "bytes" },
+    ],
+    name: "mint",
+    outputs: [],
+    stateMutability: "payable",
+    type: "function",
+  },
+] as const;
+
+// ABI tối thiểu của Zora Timed Sale Strategy: sale()
+const ZORA_TIMED_SALE_ABI = [
+  {
+    inputs: [
+      { internalType: "address", name: "mediaContract", type: "address" },
+      { internalType: "uint256", name: "tokenId", type: "uint256" },
+    ],
+    name: "sale",
+    outputs: [
+      {
+        components: [
+          { internalType: "uint96", name: "price", type: "uint96" },
+          { internalType: "uint32", name: "saleStart", type: "uint32" },
+          { internalType: "uint32", name: "saleEnd", type: "uint32" },
+          { internalType: "uint32", name: "maxPerAddress", type: "uint32" },
+          { internalType: "address", name: "fundsRecipient", type: "address" },
+        ],
+        internalType: "struct TimedSale.Sale",
+        name: "",
+        type: "tuple",
+      },
+    ],
+    stateMutability: "view",
+    type: "function",
+  },
 ] as const;
 
 export function HomeTab() {
   const { address, chainId } = useAccount();
-  const publicClient = usePublicClient({ chainId: base.id });
   const { writeContractAsync, isPending } = useWriteContract();
 
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
 
-  // Đọc thông tin token: uri, maxSupply, totalMinted
+  // Thông tin token: uri, maxSupply, totalMinted
   const { data: tokenInfo, isLoading: isLoadingTokenInfo } = useReadContract({
     abi: ZORA_1155_ABI,
     address: ZORA_1155_CONTRACT,
@@ -65,7 +119,7 @@ export function HomeTab() {
     chainId: base.id,
   });
 
-  // Đọc số NFT user đang sở hữu
+  // Số NFT user đang sở hữu
   const { data: userBalance } = useReadContract({
     abi: ZORA_1155_ABI,
     address: ZORA_1155_CONTRACT,
@@ -74,9 +128,26 @@ export function HomeTab() {
     chainId: base.id,
   });
 
-  // Parse tokenInfo
-  let maxSupply: bigint | undefined = undefined;
-  let totalMinted: bigint | undefined = undefined;
+  // mintFee (protocol fee)
+  const { data: mintFeeData } = useReadContract({
+    abi: ZORA_1155_ABI,
+    address: ZORA_1155_CONTRACT,
+    functionName: "mintFee",
+    chainId: base.id,
+  });
+
+  // Sale config từ Timed Sale Strategy
+  const { data: saleData } = useReadContract({
+    abi: ZORA_TIMED_SALE_ABI,
+    address: ZORA_TIMED_SALE_MINTER,
+    functionName: "sale",
+    args: [ZORA_1155_CONTRACT, ZORA_TOKEN_ID],
+    chainId: base.id,
+  });
+
+  // Parse token info
+  let maxSupply: bigint | undefined;
+  let totalMinted: bigint | undefined;
 
   if (tokenInfo) {
     const t = tokenInfo as any;
@@ -91,7 +162,22 @@ export function HomeTab() {
       ? BigInt(userBalance as any)
       : 0n;
 
-  // Tính % nếu có maxSupply > 0
+  const mintFee =
+    typeof mintFeeData === "bigint"
+      ? mintFeeData
+      : mintFeeData
+      ? BigInt(mintFeeData as any)
+      : 0n;
+
+  let pricePerToken = 0n;
+  if (saleData) {
+    const s = saleData as any;
+    // struct TimedSale.Sale: (price, saleStart, saleEnd, maxPerAddress, fundsRecipient)
+    pricePerToken =
+      typeof s.price === "bigint" ? s.price : s.price ? BigInt(s.price) : 0n;
+  }
+
+  // progress bar
   let progressPercent: number | null = null;
   if (maxSupply !== undefined && maxSupply > 0n && totalMinted !== undefined) {
     progressPercent = (Number(totalMinted) / Number(maxSupply)) * 100;
@@ -110,35 +196,50 @@ export function HomeTab() {
       return;
     }
 
-    if (!publicClient) {
-      setError("Public client is not ready. Please try again.");
+    if (!mintFeeData || !saleData) {
+      setError("Mint configuration not ready. Please try again in a moment.");
       setStatus(null);
       return;
     }
 
-    setStatus("Sending mint transaction...");
+    setStatus("Preparing mint transaction...");
     setError(null);
     setTxHash(null);
 
     try {
-      // Gọi hàm mint trực tiếp từ Zora SDK (collector-side)
-const { parameters } = await zoraMint({
-  mintType: "1155",
-  tokenContract: ZORA_1155_CONTRACT,
-  tokenId: ZORA_TOKEN_ID,
-  mintRecipient: address,
-  quantityToMint: 1,
-  account: address,     // địa chỉ ví dùng để ký tx
-  publicClient,         // viem public client trên Base
-});
+      const quantity = 1n;
 
-if (!parameters) {
-  throw new Error("Unable to prepare mint transaction.");
-}
+      // Tổng value = (mintFee + pricePerToken) * quantity
+      const totalCost = (mintFee + pricePerToken) * quantity;
 
-// Gửi transaction bằng wagmi
-const hash = await writeContractAsync(parameters as any);
+      // rewardsRecipients: [mintReferral, platformReferral] – có thể để user + 0x0
+      const rewardsRecipients: `0x${string}`[] = [
+        address as `0x${string}`,
+        "0x0000000000000000000000000000000000000000",
+      ];
 
+      // Timed Sale: minterArguments = abi.encode(address mintTo)
+      const minterArguments = encodeAbiParameters(
+        [{ type: "address" }],
+        [address as `0x${string}`]
+      );
+
+      setStatus("Sending mint transaction...");
+
+      const hash = await writeContractAsync({
+        abi: ZORA_1155_ABI,
+        address: ZORA_1155_CONTRACT,
+        functionName: "mint",
+        args: [
+          ZORA_TIMED_SALE_MINTER,
+          ZORA_TOKEN_ID,
+          quantity,
+          rewardsRecipients,
+          minterArguments,
+        ],
+        chainId: base.id,
+        value: totalCost,
+      });
 
       setStatus("Successfully minted the NFT");
       setTxHash(hash);
@@ -148,18 +249,23 @@ const hash = await writeContractAsync(parameters as any);
 
       const raw = String(err?.shortMessage || err?.message || "");
       let msg =
-        "Mint failed. An unknown error occurred, please try again.";
+        "Mint failed. An error occurred, please try again.";
 
-      if (raw.toLowerCase().includes("user rejected")) {
+      const lower = raw.toLowerCase();
+      if (lower.includes("user rejected")) {
         msg = "You rejected the transaction in your wallet.";
       } else if (raw.includes("INSUFFICIENT_FUNDS")) {
         msg =
-          "Insufficient funds on Base to pay gas and Zora protocol fee.";
-      } else if (raw.includes("CHAIN_MISMATCH")) {
-        msg = "Wrong network. Please switch your wallet to Base.";
+          "Insufficient funds on Base to pay gas and protocol fee.";
+      } else if (lower.includes("salestartedafter")) {
+        msg = "Sale has not started yet.";
+      } else if (lower.includes("saleended")) {
+        msg = "Sale has ended.";
+      } else if (lower.includes("maxperaddress")) {
+        msg = "You reached the mint limit for this drop.";
       }
 
-      setError(msg);
+      setError(`${msg}\n\nDebug: ${raw}`);
     }
   };
 
@@ -214,7 +320,7 @@ const hash = await writeContractAsync(parameters as any);
 
           <div className="bg-purple-900/60 px-4 py-3 space-y-2 border-t border-white/5">
             <ul className="text-[11px] space-y-1 text-purple-100">
-              <li>• Mint Price: Free mint (gas + Zora fee)</li>
+              <li>• Mint Price: Free mint + protocol fee</li>
               <li>• Mint Limit: 1 per wallet (soft rule)</li>
               <li>• Mint Method: FCFS (first come, first served)</li>
               <li>• Chain: Base Mainnet</li>
@@ -294,7 +400,7 @@ const hash = await writeContractAsync(parameters as any);
           )}
 
           {error && (
-            <div className="rounded-xl border border-red-300/40 bg-red-900/30 px-3 py-2 text-[11px] text-red-100">
+            <div className="rounded-xl border border-red-300/40 bg-red-900/30 px-3 py-2 text-[11px] text-red-100 whitespace-pre-wrap">
               {error}
             </div>
           )}
