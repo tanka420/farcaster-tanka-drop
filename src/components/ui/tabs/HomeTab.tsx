@@ -183,7 +183,7 @@ export function HomeTab() {
     progressPercent = (Number(totalMinted) / Number(maxSupply)) * 100;
   }
 
-  const handleMint = async () => {
+    const handleMint = async () => {
     if (!address) {
       setError("Please connect your wallet before minting.");
       setStatus(null);
@@ -196,7 +196,7 @@ export function HomeTab() {
       return;
     }
 
-    if (!mintFeeData || !saleData) {
+    if (!mintFeeData) {
       setError("Mint configuration not ready. Please try again in a moment.");
       setStatus(null);
       return;
@@ -209,16 +209,20 @@ export function HomeTab() {
     try {
       const quantity = 1n;
 
-      // Tổng value = (mintFee + pricePerToken) * quantity
-      const totalCost = (mintFee + pricePerToken) * quantity;
+      // mintFee là BigInt – protocol fee của Zora
+      const mintFee =
+        typeof mintFeeData === "bigint"
+          ? mintFeeData
+          : BigInt(mintFeeData as any);
 
-      // rewardsRecipients: [mintReferral, platformReferral] – có thể để user + 0x0
+      // 🔥 Đang free mint nên tạm thời KHÔNG cộng pricePerToken nữa
+      const totalCost = mintFee; // chỉ gửi đúng protocol fee
+
       const rewardsRecipients: `0x${string}`[] = [
         address as `0x${string}`,
         "0x0000000000000000000000000000000000000000",
       ];
 
-      // Timed Sale: minterArguments = abi.encode(address mintTo)
       const minterArguments = encodeAbiParameters(
         [{ type: "address" }],
         [address as `0x${string}`]
@@ -238,7 +242,7 @@ export function HomeTab() {
           minterArguments,
         ],
         chainId: base.id,
-        value: totalCost,
+        value: totalCost, // ✔ chỉ còn mintFee
       });
 
       setStatus("Successfully minted the NFT");
@@ -268,6 +272,7 @@ export function HomeTab() {
       setError(`${msg}\n\nDebug: ${raw}`);
     }
   };
+
 
   return (
     <div className="min-h-[calc(100vh-160px)] w-full bg-gradient-to-b from-[#3b1c63] via-[#43206d] to-[#1a082e] text-white flex justify-center px-4 py-4">
