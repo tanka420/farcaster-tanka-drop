@@ -8,14 +8,14 @@ import {
   usePublicClient,
 } from "wagmi";
 import { base } from "wagmi/chains";
-import { createCollectorClient } from "@zoralabs/protocol-sdk";
+import { mint as zoraMint } from "@zoralabs/protocol-sdk";
 import { ConnectWalletButton } from "~/components/ConnectWalletButton";
 
 const ZORA_1155_CONTRACT =
-  "0xb587dd0dbab77e59c7b7a146aedb8a4ef1cefe8c" as const;
+  "0xB51EB1a3FA71Ad0fEfDCC8A1A17821016bc4fc68" as const;
 const ZORA_TOKEN_ID = 1n;
 
-// ABI tối thiểu: chỉ cần getTokenInfo để đọc metadata/supply
+// ABI tối thiểu: getTokenInfo + balanceOf
 const ZORA_1155_ABI = [
   {
     inputs: [{ internalType: "uint256", name: "tokenId", type: "uint256" }],
@@ -32,6 +32,16 @@ const ZORA_1155_ABI = [
         type: "tuple",
       },
     ],
+    stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [
+      { internalType: "address", name: "account", type: "address" },
+      { internalType: "uint256", name: "id", type: "uint256" },
+    ],
+    name: "balanceOf",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
     stateMutability: "view",
     type: "function",
   },
@@ -55,7 +65,16 @@ export function HomeTab() {
     chainId: base.id,
   });
 
-  // tokenInfo là struct { uri, maxSupply, totalMinted } (và cũng là tuple)
+  // Đọc số NFT user đang sở hữu
+  const { data: userBalance } = useReadContract({
+    abi: ZORA_1155_ABI,
+    address: ZORA_1155_CONTRACT,
+    functionName: "balanceOf",
+    args: address ? [address, ZORA_TOKEN_ID] : undefined,
+    chainId: base.id,
+  });
+
+  // Parse tokenInfo
   let maxSupply: bigint | undefined = undefined;
   let totalMinted: bigint | undefined = undefined;
 
@@ -64,6 +83,13 @@ export function HomeTab() {
     maxSupply = t.maxSupply ?? t[1];
     totalMinted = t.totalMinted ?? t[2];
   }
+
+  const owned =
+    typeof userBalance === "bigint"
+      ? userBalance
+      : userBalance
+      ? BigInt(userBalance as any)
+      : 0n;
 
   // Tính % nếu có maxSupply > 0
   let progressPercent: number | null = null;
@@ -95,43 +121,42 @@ export function HomeTab() {
     setTxHash(null);
 
     try {
-      // Tạo collector client của Zora dùng viem publicClient
-      const collectorClient = createCollectorClient({
-        chainId: base.id,
-        publicClient,
-      });
+      // Gọi hàm mint trực tiếp từ Zora SDK (collector-side)
+const { parameters } = await zoraMint({
+  mintType: "1155",
+  tokenContract: ZORA_1155_CONTRACT,
+  tokenId: ZORA_TOKEN_ID,
+  mintRecipient: address,
+  quantityToMint: 1,
+  account: address,     // địa chỉ ví dùng để ký tx
+  publicClient,         // viem public client trên Base
+});
 
-      // Chuẩn bị transaction mint chuẩn Zora 1155
-      const { parameters } = await collectorClient.mint({
-        mintType: "1155",
-        tokenContract: ZORA_1155_CONTRACT,
-        tokenId: ZORA_TOKEN_ID,
-        mintRecipient: address,
-        quantityToMint: 1,
-        minterAccount: address,
-      });
+if (!parameters) {
+  throw new Error("Unable to prepare mint transaction.");
+}
 
-      if (!parameters) {
-        throw new Error("Unable to prepare mint transaction.");
-      }
+// Gửi transaction bằng wagmi
+const hash = await writeContractAsync(parameters as any);
 
-      // Gọi tx qua wagmi (parameters đã chứa abi, address, functionName, args, value,...)
-      const hash = await writeContractAsync(parameters as any);
 
-      setStatus("Successfully minted the NFT 🎉");
+      setStatus("Successfully minted the NFT");
       setTxHash(hash);
     } catch (err: any) {
-      console.error(err);
+      console.error("Mint error:", err);
       setStatus(null);
 
-      const raw = String(err?.message || "");
+      const raw = String(err?.shortMessage || err?.message || "");
       let msg =
         "Mint failed. An unknown error occurred, please try again.";
 
-      if (raw.includes("user rejected") || raw.includes("User rejected")) {
+      if (raw.toLowerCase().includes("user rejected")) {
         msg = "You rejected the transaction in your wallet.";
       } else if (raw.includes("INSUFFICIENT_FUNDS")) {
-        msg = "Insufficient funds to pay gas and protocol fee on Base.";
+        msg =
+          "Insufficient funds on Base to pay gas and Zora protocol fee.";
+      } else if (raw.includes("CHAIN_MISMATCH")) {
+        msg = "Wrong network. Please switch your wallet to Base.";
       }
 
       setError(msg);
@@ -202,7 +227,6 @@ export function HomeTab() {
                 </p>
               ) : maxSupply !== undefined && totalMinted !== undefined ? (
                 maxSupply === 0n ? (
-                  // Open edition: chỉ hiển thị tổng minted
                   <p className="text-[11px] text-purple-100">
                     Minted: {totalMinted.toString()} (open edition).
                   </p>
@@ -244,6 +268,12 @@ export function HomeTab() {
               ? "Mint"
               : "Connect wallet to mint"}
           </button>
+
+          {address && (
+            <p className="text-[11px] text-purple-100 text-center">
+              You currently own: {owned.toString()} NFT(s) of this drop.
+            </p>
+          )}
 
           {status && (
             <div className="rounded-xl border border-green-300/40 bg-green-900/30 px-3 py-2 text-[11px] text-green-100">
